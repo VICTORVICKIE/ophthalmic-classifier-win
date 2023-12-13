@@ -11,5 +11,6 @@ vite.config.ts.timestamp-*
 .vscode
 target
 src-tauri/models
-src-tauri/bin/tensorflow*
-src-tauri/bin/oct-tf*
+!src-tauri/models/README*
+src-tauri/bin/
+!src-tauri/bin/README*

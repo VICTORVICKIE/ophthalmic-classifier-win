@@ -10,7 +10,7 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vscode
 target
-src-tauri/models
-!src-tauri/models/README*
-src-tauri/bin/
-!src-tauri/bin/README*
+src-tauri/models/*
+!src-tauri/models/README.md
+src-tauri/bin/*
+!src-tauri/bin/README.md

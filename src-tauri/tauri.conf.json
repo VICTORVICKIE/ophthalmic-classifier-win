@@ -24,9 +24,11 @@
 			},
 			"fs": {
 				"exists": true,
+				"createDir": true,
 				"readDir": true,
+				"writeFile": true,
 				"readFile": true,
-				"scope": ["**"]
+				"scope": ["$RESOURCE/**"]
 			},
 			"dialog": {
 				"open": true

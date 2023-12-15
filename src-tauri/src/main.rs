@@ -40,42 +40,131 @@ pub struct Response<'a> {
 
 impl<'a> Response<'a> {
     fn failure(msg: &'a str) -> Self {
+        let mut res = Response::default();
+        res.message = msg;
+        return res;
+    }
+}
+#[derive(Debug, Copy, Clone)]
+enum MsgStatus {
+    RESPONSE,
+    ERROR,
+    LOG,
+}
+struct Message<'a> {
+    app: &'a tauri::AppHandle,
+    inner: &'a str,
+    status: MsgStatus,
+}
+
+impl<'a> Message<'a> {
+    fn new(app: &'a tauri::AppHandle, msg: &'a str) -> Self {
         return Self {
-            success: false,
-            result: None,
-            message: msg,
+            app,
+            inner: msg,
+            status: MsgStatus::LOG,
         };
+    }
+
+    fn set(&mut self, inner: &'a str) -> Self {
+        return Self {
+            app: self.app,
+            inner,
+            status: self.status,
+        };
+    }
+
+    fn window(&self) -> tauri::Window {
+        return self
+            .app
+            .get_window("main")
+            .ok_or_else(|| {
+                self.log(
+                    &format!("[ERROR] Unable tot get main window"),
+                    MsgStatus::ERROR,
+                )
+            })
+            .unwrap();
+    }
+
+    fn emit(&self, msg: &'a str, status: MsgStatus) {
+        self.window()
+            .emit("prediction", msg)
+            .map_err(|err| {
+                self.log(
+                    &format!("{:?} Failed to emit prediction event: {}", status, err),
+                    status,
+                )
+            })
+            .unwrap();
+    }
+
+    fn log(&self, msg: &str, status: MsgStatus) {
+        let mut log_dir = match Resource::new(self.app, "logs") {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        if !Path::new(&log_dir.path()).exists() {
+            fs::create_dir(log_dir.path());
+        }
+
+        let ist = Utc::now().with_timezone(&Kolkata);
+
+        let date = &ist.format("ophthalmic.classifier.%Y%m%d.log").to_string();
+        let time = &ist.format("[%Y-%m-%d %H:%M:%S]").to_string();
+
+        let log_file = match log_dir.join(date) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+
+        let mut f = match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file.path())
+        {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+
+        match writeln!(f, "{} {:?} {}", time, status, msg) {
+            Ok(_) => return,
+            Err(_) => return,
+        }
+    }
+
+    fn emit_n_log(&self, status: MsgStatus) {
+        self.log(self.inner, status);
+        self.emit(self.inner, status);
     }
 }
 
 fn emit_prediction(app: &tauri::AppHandle, event: &CommandEvent) {
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| log(&app, &format!("Unable tot get main window")))
-        .unwrap();
+    let mut msg = Message::new(app, "");
     match event {
         CommandEvent::Stdout(res) => {
-            log(app, &format!("[RESPONSE] {}", res.trim()));
-            window
-                .emit("prediction", Some(res))
-                .map_err(|err| {
-                    log(
-                        &app,
-                        &format!("[ERROR] Failed to emit prediction event: {}", err),
-                    )
-                })
-                .unwrap();
+            msg.set(res.trim());
+            msg.emit_n_log(MsgStatus::RESPONSE)
         }
-        CommandEvent::Stderr(tf_log) => log(app, &format!("[TF LOG] {}", tf_log.trim())),
-        CommandEvent::Error(e) => log(app, &format!("[ERROR] {}\n{}", e.trim(), "-".repeat(100))),
-        CommandEvent::Terminated(signal) => log(
-            app,
-            &format!("[TERMINATED] {:?}\n{}", signal, "-".repeat(100)),
-        ),
-        _ => log(
-            app,
-            &format!("[ERROR] Unknown Event Encountered\n{}", "-".repeat(100)),
-        ),
+        CommandEvent::Stderr(tf_log) => {
+            msg.set(tf_log.trim());
+            msg.emit_n_log(MsgStatus::LOG)
+        }
+        CommandEvent::Error(e) => {
+            let e = format!("{}\n{}", e.trim(), "-".repeat(100));
+            msg.set(&e);
+            msg.emit_n_log(MsgStatus::ERROR)
+        }
+        CommandEvent::Terminated(term) => {
+            let term = format!("{:?}\n{}", term, "-".repeat(100));
+            msg.set(&term);
+            msg.emit_n_log(MsgStatus::LOG)
+        }
+        _ => {
+            let e = format!("Unknown Event Encountered\n{}", "-".repeat(100));
+            msg.set(&e);
+            msg.emit_n_log(MsgStatus::ERROR)
+        }
     }
 }
 
@@ -116,69 +205,38 @@ impl Resource {
     }
 }
 
-fn log(app: &tauri::AppHandle, msg: &str) {
-    let mut log_dir = match Resource::new(&app, "logs") {
-        Ok(l) => l,
-        Err(_) => return,
-    };
-    if !Path::new(&log_dir.path()).exists() {
-        fs::create_dir(log_dir.path());
-    }
-
-    let ist = Utc::now().with_timezone(&Kolkata);
-
-    let date = &ist.format("ophthalmic.classifier.%Y%m%d.log").to_string();
-    let time = &ist.format("[%Y-%m-%d %H:%M:%S]").to_string();
-
-    let log = match log_dir.join(date) {
-        Ok(l) => l,
-        Err(_) => return,
-    };
-
-    let mut f = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log.path())
-    {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-
-    match writeln!(f, "{} {}", time, msg) {
-        Ok(_) => return,
-        Err(_) => return,
-    }
-}
-
 #[tauri::command]
 fn predictor<'a>(app: tauri::AppHandle, model: &'a str, file: &'a str) {
+    let msg = Message::new(&app, "");
     let window = app
         .get_window("main")
-        .ok_or_else(|| log(&app, &format!("[ERROR] Unable tot get main window")))
+        .ok_or_else(|| msg.log(&format!("Unable tot get main window"), MsgStatus::ERROR))
         .unwrap();
     let model_dir = Resource::new(&app, "models")
         .map_err(|err| {
-            log(
-                &app,
-                &format!(
-                    "[ERROR] Unable to resolve models directory/folder!: {}",
-                    err
-                ),
+            msg.log(
+                &format!("Unable to resolve models directory/folder!: {}", err),
+                MsgStatus::ERROR,
             )
         })
         .unwrap();
 
     let (mut rx, _) = Command::new_sidecar("oct-tf")
         .map_err(|err| {
-            log(
-                &app,
-                &format!("[ERROR] Failed to create `oct-tf` binary command: {}", err),
+            msg.log(
+                &format!("Failed to create `oct-tf` binary command: {}", err),
+                MsgStatus::ERROR,
             )
         })
         .unwrap()
         .args(["-d", model_dir.path(), "-n", model, "-i", file])
         .spawn()
-        .map_err(|err| log(&app, &format!("[ERROR] Failed to spawn sidecar: {}", err)))
+        .map_err(|err| {
+            msg.log(
+                &format!("Failed to spawn sidecar: {}", err),
+                MsgStatus::ERROR,
+            )
+        })
         .unwrap();
 
     tauri::async_runtime::spawn(async move {

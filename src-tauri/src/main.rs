@@ -1,15 +1,12 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-#![allow(dead_code, unused)]
 use chrono::Utc;
 use chrono_tz::Asia::Kolkata;
 
 use std::{
-    collections::HashMap,
     error::Error,
-    fs::{self, File, OpenOptions},
-    io::{self, Write},
-    mem,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -38,52 +35,31 @@ pub struct Response<'a> {
     pub message: &'a str,
 }
 
-impl<'a> Response<'a> {
-    fn failure(msg: &'a str) -> Self {
-        let mut res = Response::default();
-        res.message = msg;
-        return res;
-    }
-}
 #[derive(Debug, Copy, Clone)]
 enum MsgStatus {
-    RESPONSE,
-    ERROR,
+    RES,
+    ERR,
     LOG,
 }
 struct Message<'a> {
     app: &'a tauri::AppHandle,
     inner: &'a str,
-    status: MsgStatus,
 }
 
 impl<'a> Message<'a> {
-    fn new(app: &'a tauri::AppHandle, msg: &'a str) -> Self {
-        return Self {
-            app,
-            inner: msg,
-            status: MsgStatus::LOG,
-        };
+    fn new(app: &'a tauri::AppHandle, inner: &'a str) -> Self {
+        return Self { app, inner };
     }
 
-    fn set(&mut self, inner: &'a str) -> Self {
-        return Self {
-            app: self.app,
-            inner,
-            status: self.status,
-        };
+    fn set(&mut self, inner: &'a str) {
+        self.inner = inner;
     }
 
     fn window(&self) -> tauri::Window {
         return self
             .app
             .get_window("main")
-            .ok_or_else(|| {
-                self.log(
-                    &format!("[ERROR] Unable tot get main window"),
-                    MsgStatus::ERROR,
-                )
-            })
+            .ok_or_else(|| self.log(&format!("Unable tot get main window"), MsgStatus::ERR))
             .unwrap();
     }
 
@@ -105,7 +81,10 @@ impl<'a> Message<'a> {
             Err(_) => return,
         };
         if !Path::new(&log_dir.path()).exists() {
-            fs::create_dir(log_dir.path());
+            match fs::create_dir(log_dir.path()) {
+                Ok(_) => {}
+                Err(_) => return,
+            }
         }
 
         let ist = Utc::now().with_timezone(&Kolkata);
@@ -127,7 +106,7 @@ impl<'a> Message<'a> {
             Err(_) => return,
         };
 
-        match writeln!(f, "{} {:?} {}", time, status, msg) {
+        match writeln!(f, "{} [{:?}] {}", time, status, msg) {
             Ok(_) => return,
             Err(_) => return,
         }
@@ -144,7 +123,7 @@ fn emit_prediction(app: &tauri::AppHandle, event: &CommandEvent) {
     match event {
         CommandEvent::Stdout(res) => {
             msg.set(res.trim());
-            msg.emit_n_log(MsgStatus::RESPONSE)
+            msg.emit_n_log(MsgStatus::RES)
         }
         CommandEvent::Stderr(tf_log) => {
             msg.set(tf_log.trim());
@@ -153,7 +132,7 @@ fn emit_prediction(app: &tauri::AppHandle, event: &CommandEvent) {
         CommandEvent::Error(e) => {
             let e = format!("{}\n{}", e.trim(), "-".repeat(100));
             msg.set(&e);
-            msg.emit_n_log(MsgStatus::ERROR)
+            msg.emit_n_log(MsgStatus::ERR)
         }
         CommandEvent::Terminated(term) => {
             let term = format!("{:?}\n{}", term, "-".repeat(100));
@@ -163,7 +142,7 @@ fn emit_prediction(app: &tauri::AppHandle, event: &CommandEvent) {
         _ => {
             let e = format!("Unknown Event Encountered\n{}", "-".repeat(100));
             msg.set(&e);
-            msg.emit_n_log(MsgStatus::ERROR)
+            msg.emit_n_log(MsgStatus::ERR)
         }
     }
 }
@@ -180,13 +159,13 @@ impl Resource {
 
         let path = match path.as_ref().and_then(|f| f.to_str()) {
             Some(p) => p,
-            None => return Err(format!("[ERROR] Unable to resolve path: {}", p).into()),
+            None => return Err(format!("Unable to resolve path: {}", p).into()),
         };
 
         let path: PathBuf = [path, p].iter().collect();
         let path = match path.to_str() {
             Some(p) => p,
-            None => return Err(format!("[ERROR] Unable to resolve path: {}", p).into()),
+            None => return Err(format!("Unable to resolve path: {}", p).into()),
         };
         return Ok(Self(Arc::from(path)));
     }
@@ -199,7 +178,7 @@ impl Resource {
         let path: PathBuf = [self.path(), p].iter().collect();
         let path = match path.to_str() {
             Some(p) => p,
-            None => return Err(format!("[ERROR] Unable to join path: {}", p).into()),
+            None => return Err(format!("Unable to join path: {}", p).into()),
         };
         return Ok(Self(Arc::from(path)));
     }
@@ -208,15 +187,11 @@ impl Resource {
 #[tauri::command]
 fn predictor<'a>(app: tauri::AppHandle, model: &'a str, file: &'a str) {
     let msg = Message::new(&app, "");
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| msg.log(&format!("Unable tot get main window"), MsgStatus::ERROR))
-        .unwrap();
     let model_dir = Resource::new(&app, "models")
         .map_err(|err| {
             msg.log(
                 &format!("Unable to resolve models directory/folder!: {}", err),
-                MsgStatus::ERROR,
+                MsgStatus::ERR,
             )
         })
         .unwrap();
@@ -225,18 +200,13 @@ fn predictor<'a>(app: tauri::AppHandle, model: &'a str, file: &'a str) {
         .map_err(|err| {
             msg.log(
                 &format!("Failed to create `oct-tf` binary command: {}", err),
-                MsgStatus::ERROR,
+                MsgStatus::ERR,
             )
         })
         .unwrap()
         .args(["-d", model_dir.path(), "-n", model, "-i", file])
         .spawn()
-        .map_err(|err| {
-            msg.log(
-                &format!("Failed to spawn sidecar: {}", err),
-                MsgStatus::ERROR,
-            )
-        })
+        .map_err(|err| msg.log(&format!("Failed to spawn sidecar: {}", err), MsgStatus::ERR))
         .unwrap();
 
     tauri::async_runtime::spawn(async move {
